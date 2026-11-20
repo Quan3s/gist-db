@@ -42,7 +42,7 @@ Usage:
   gistdb [global opts] <command> [args...]
 
 Commands:
-  server                          Start REST+TCP server
+  server                          Start REST + TCP + Redis(RESP) + PostgreSQL protocol servers
   kv <op> [args...]               KV operation (redis-like): get,set,del,keys,hget,hset,incr,...
   table <op> [args...]            Table operation: listTables,describe,select,insert,query,...
   sql <SQL...>                    Run SQL (table mode): gistdb sql "SELECT * FROM users"
@@ -60,28 +60,35 @@ Global options:
   --owner <user>                  GitHub owner (local mode, env GITHUB_USER)
   --index-path <path>             Local index path (env GISTDB_INDEX_PATH)
   --auth <secret>                 Server auth secret (env GISTDB_AUTH)
-  --json                          Print result as JSON (default: pretty)
-  --raw                           Print raw result
+  --format <fmt>                  Output format: table (psql), redis, json, raw
+  --json                          Print result as JSON (alias for --format json)
+  --raw                           Print raw result (alias for --format raw)
 
 Server options (for "server" command):
   --http-port <n>                 REST port (default 3010)
-  --tcp-port <n>                  TCP port (default 3011)
+  --tcp-port <n>                  TCP JSONL port (default 3011)
+  --redis-port <n>                Redis RESP protocol port (default 6379, env GISTDB_REDIS_PORT)
+  --pg-port <n>                   PostgreSQL wire protocol port (default 5432, env GISTDB_PG_PORT)
   --host <addr>                   Bind host (default 0.0.0.0)
 
 Examples:
-  # Start server (REST + TCP)
-  gistdb server --http-port 3010 --tcp-port 3011
+  # Start server (REST + TCP + Redis + PostgreSQL protocols)
+  gistdb server --http-port 3010 --tcp-port 3011 --redis-port 6379 --pg-port 5432
 
   # KV over TCP URL (like redis)
   gistdb --url gistdb://127.0.0.1:3011/mykv --mode kv kv set hello world
-  gistdb -u gistdb://127.0.0.1:3011/mykv kv get hello
+  gistdb -u gistdb://127.0.0.1:3011/mykv --format redis kv get hello
 
-  # Table/SQL over REST URL
-  gistdb -u http://127.0.0.1:3010 --db mydb sql "SELECT * FROM users"
+  # Table/SQL over REST URL with psql-like output
+  gistdb -u http://127.0.0.1:3010 --db mydb --format table sql "SELECT * FROM users"
 
   # Local direct mode (no server, uses GITHUB_TOKEN + raw reads/writes)
   gistdb --db mykv kv set hello world
-  gistdb --db mydb table listTables
+  gistdb --db mydb --format table sql "SHOW TABLES"
+
+  # Connect with standard clients
+  redis-cli -p 6379
+  psql -h 127.0.0.1 -p 5432 -d mydb
 
 Notes:
   - Data reads use gist raw URLs (no GitHub content API). Writes use GitHub API.
@@ -90,17 +97,12 @@ Notes:
 }
 
 function printResult(val, opts = {}) {
-  if (opts.raw) {
-    if (typeof val === 'string') process.stdout.write(val + (val.endsWith('\n') ? '' : '\n'));
-    else process.stdout.write(String(val) + '\n');
-    return;
-  }
-  if (opts.json) {
-    console.log(JSON.stringify(val, null, 2));
-    return;
-  }
-  if (typeof val === 'string') console.log(val);
-  else console.log(JSON.stringify(val, null, 2));
+  const { formatResult } = require('../lib/format');
+  let fmt = opts.format || 'json';
+  if (opts.raw) fmt = 'raw';
+  if (opts.json) fmt = 'json';
+  const out = formatResult(val, fmt, opts.ctx || {});
+  process.stdout.write(out);
 }
 
 function parseLooseValue(s) {
@@ -239,7 +241,7 @@ async function main() {
   if (flags.help || flags.h || args[0] === 'help' || args.length === 0) { printHelp(); return; }
 
   const cmd = args[0];
-  const outOpts = { json: !!flags.json, raw: !!flags.raw };
+  const outOpts = { json: !!flags.json, raw: !!flags.raw, format: getOpt(flags, ['format', 'f'], null) };
   const url = getOpt(flags, ['url', 'u'], null);
   const dbName = getOpt(flags, ['db', 'd'], '');
   let mode = getOpt(flags, ['mode', 'm'], '');
@@ -250,15 +252,21 @@ async function main() {
       host: flags.host,
       httpPort: flags['http-port'],
       tcpPort: flags['tcp-port'],
+      redisPort: flags['redis-port'],
+      pgPort: flags['pg-port'],
       auth: flags.auth,
       token: flags.token,
       owner: flags.owner,
       indexPath: flags['index-path'],
       http: flags['no-http'] ? false : undefined,
       tcp: flags['no-tcp'] ? false : undefined,
+      redis: flags['no-redis'] ? false : undefined,
+      pg: flags['no-pg'] ? false : undefined,
     });
-    if (info.http) console.log(`[gist-db] REST  listening on ${info.http.url}`);
-    if (info.tcp) console.log(`[gist-db] TCP   listening on ${info.tcp.url} (JSON-line protocol)`);
+    if (info.http) console.log(`[gist-db] REST       listening on ${info.http.url}`);
+    if (info.tcp) console.log(`[gist-db] TCP JSONL  listening on ${info.tcp.url}`);
+    if (info.redis) console.log(`[gist-db] Redis RESP listening on ${info.redis.url} (redis-cli compatible)`);
+    if (info.pg) console.log(`[gist-db] PostgreSQL listening on ${info.pg.url} (psql compatible)`);
     console.log(`[gist-db] reads via gist raw URLs; writes via GitHub API`);
     // keep process alive
     await new Promise(() => {});
@@ -268,6 +276,8 @@ async function main() {
   if (cmd === 'ping') {
     if (!url) throw new Error('--url is required for ping');
     const res = await runRemote(url, mode, dbName, 'ping', [], flags);
+    outOpts.ctx = { op: 'ping', mode: mode || 'kv' };
+    if (!outOpts.format && !outOpts.json && !outOpts.raw) outOpts.format = 'redis';
     printResult(res, outOpts); return;
   }
   if (cmd === 'info') {
@@ -281,6 +291,8 @@ async function main() {
     const rest = args.slice(2);
     if (!op) throw new Error('KV op required');
     const result = url ? await runRemote(url, mode, dbName, op, rest, flags) : await runLocal(mode, dbName, op, rest, flags);
+    outOpts.ctx = { op, mode: 'kv' };
+    if (!outOpts.format && !outOpts.json && !outOpts.raw) outOpts.format = 'redis';
     printResult(result, outOpts); return;
   }
 
@@ -290,6 +302,8 @@ async function main() {
     const rest = args.slice(2);
     if (!op) throw new Error('Table op required');
     const result = url ? await runRemote(url, mode, dbName, op, rest, flags) : await runLocal(mode, dbName, op, rest, flags);
+    outOpts.ctx = { op, mode: 'table' };
+    if (!outOpts.format && !outOpts.json && !outOpts.raw) outOpts.format = 'table';
     printResult(result, outOpts); return;
   }
 
@@ -298,6 +312,8 @@ async function main() {
     const sql = args.slice(1).join(' ');
     if (!sql) throw new Error('SQL required');
     const result = url ? await runRemote(url, mode, dbName, 'query', [sql], flags) : await runLocal(mode, dbName, 'query', [sql], flags);
+    outOpts.ctx = { op: 'query', mode: 'table', sql };
+    if (!outOpts.format && !outOpts.json && !outOpts.raw) outOpts.format = 'table';
     printResult(result, outOpts); return;
   }
 

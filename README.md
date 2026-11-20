@@ -83,23 +83,23 @@ const { createGistDB } = require('./gist_db');
 
 ## 2) Server REST + TCP (kết nối qua URL giống SQL/Redis)
 
-Server cho phép nhiều client kết nối và thao tác DB qua URL.
+Server cho phép nhiều client kết nối và thao tác DB qua URL, hỗ trợ các protocol: **REST/HTTP**, **TCP JSONL**, **Redis RESP** (tương thích `redis-cli`), và **PostgreSQL wire protocol** (tương thích `psql` cơ bản).
 
 ### Chạy server
 
 ```bash
 # từ repo root
-node gist_db/bin/gistdb.js server --http-port 3010 --tcp-port 3011
+node gist_db/bin/gistdb.js server --http-port 3010 --tcp-port 3011 --redis-port 6379 --pg-port 5432
 
 # hoặc
-GITHUB_TOKEN=... GITHUB_USER=... node gist_db/server/index.js --http-port 3010 --tcp-port 3011
+GITHUB_TOKEN=... GITHUB_USER=... node gist_db/server/index.js --http-port 3010 --tcp-port 3011 --redis-port 6379 --pg-port 5432
 ```
 
-Tuỳ chọn: `--host`, `--http-port` (mặc định 3010, env `GISTDB_HTTP_PORT`/`PORT`), `--tcp-port` (mặc định 3011, env `GISTDB_TCP_PORT`), `--auth <secret>` (`GISTDB_AUTH`), `--token`, `--owner`, `--index-path`, `--no-http`, `--no-tcp`.
+Tuỳ chọn: `--host`, `--http-port` (mặc định 3010, env `GISTDB_HTTP_PORT`/`PORT`), `--tcp-port` (mặc định 3011, env `GISTDB_TCP_PORT`), `--redis-port` (mặc định 6379, env `GISTDB_REDIS_PORT`), `--pg-port` (mặc định 5432, env `GISTDB_PG_PORT`), `--auth <secret>` (`GISTDB_AUTH`), `--token`, `--owner`, `--index-path`, `--no-http`, `--no-tcp`, `--no-redis`, `--no-pg`.
 
 ### URL & giao thức
 
-- **TCP (JSON-line), giống Redis URL**: `gistdb://[auth@]host:3011[/db]?mode=kv|table`
+- **TCP (JSON-line)**: `gistdb://[auth@]host:3011[/db]?mode=kv|table`
   - Mỗi request là 1 dòng JSON, mỗi response là 1 dòng JSON.
   - Request: `{"id":1,"mode":"kv","db":"mykv","op":"get","args":["key"]}`
   - Response: `{"id":1,"ok":true,"result":"..."}` hoặc `{"id":1,"ok":false,"error":"..."}`
@@ -111,6 +111,12 @@ Tuỳ chọn: `--host`, `--http-port` (mặc định 3010, env `GISTDB_HTTP_PORT
   - `POST /v1/table/:db/query` body `{ "sql": "SELECT ..." }`
   - `POST /v1/table/:db/:op` (select/insert/update/delete/createTable/listTables/...)
   - Auth (nếu bật): header `Authorization: Bearer <secret>` hoặc `X-GistDB-Auth`
+- **Redis RESP protocol** (KV mode): `redis://host:6379` (tương thích `redis-cli`)
+  - Hỗ trợ các lệnh phổ biến: `PING`, `ECHO`, `AUTH`, `SELECT/USE`, `SET/GET/DEL/EXISTS/KEYS/TYPE/MGET/MSET/INCR/DECR/INCRBY/APPEND/STRLEN/EXPIRE/TTL/PERSIST/DBSIZE/FLUSHDB`, hash (`HSET/HMSET/HGET/HGETALL/HDEL/HEXISTS/HKEYS/HVALS`), list (`LPUSH/RPUSH/LRANGE/LLEN`), set (`SADD/SMEMBERS/SREM/SCARD`), `INFO/COMMAND/QUIT/HELLO`.
+  - Dùng với `redis-cli -h 127.0.0.1 -p 6379` (db logic có thể chọn qua `SELECT <name>`/`USE <name>`).
+- **PostgreSQL wire protocol v3** (Table/SQL mode, subset): `postgresql://host:5432/<db>` (tương thích `psql` cơ bản)
+  - Hỗ trợ startup/auth cơ bản (trust hoặc cleartext password khi bật `--auth`), Simple Query protocol, trả về kết quả dạng bảng/command tag cho các câu SQL mà engine hỗ trợ (`SELECT/INSERT/UPDATE/DELETE/CREATE TABLE/DROP TABLE/SHOW TABLES/...`).
+  - Dùng với `psql -h 127.0.0.1 -p 5432 -d mydb` (với server không bật auth).
 
 Ví dụ REST:
 
@@ -127,6 +133,21 @@ curl -s -X POST http://127.0.0.1:3010/v1/table/mydb/query \
 ```
 
 Ví dụ TCP (netcat / JSONL): gửi từng dòng JSON tới `127.0.0.1:3011`, ví dụ `{"id":1,"op":"ping"}`.
+
+Ví dụ Redis protocol:
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 PING
+redis-cli -h 127.0.0.1 -p 6379 SET hello world
+redis-cli -h 127.0.0.1 -p 6379 GET hello
+```
+
+Ví dụ PostgreSQL protocol:
+
+```bash
+psql "host=127.0.0.1 port=5432 dbname=mydb sslmode=disable" -c "SELECT * FROM users"
+psql "host=127.0.0.1 port=5432 dbname=mydb sslmode=disable" -c "SHOW TABLES"
+```
 
 ---
 
@@ -153,7 +174,11 @@ node gist_db/bin/gistdb.js --db mydb sql "SHOW TABLES"
 ```
 
 Lệnh chính: `server`, `kv <op> [args...]`, `table <op> [args...]`, `sql "<SQL>"`, `ping`, `info`.
-Tuỳ chọn: `--url/-u`, `--db`, `--mode`, `--token`, `--owner`, `--index-path`, `--auth`, `--json`.
+Tuỳ chọn: `--url/-u`, `--db`, `--mode`, `--token`, `--owner`, `--index-path`, `--auth`, `--format <table|redis|json|raw>`, `--json`, `--raw`.
+
+- `--format table` (psql-like): in bảng dạng PostgreSQL `psql` cho kết quả dạng hàng/cột và command tag (INSERT/UPDATE/DELETE/CREATE TABLE...) khi phù hợp.
+- `--format redis`: in kết quả kiểu `redis-cli` (`OK`, `(integer) N`, `(nil)`, mảng đánh số...).
+- Mặc định: `kv`/`ping` -> `redis`, `table`/`sql` -> `table` (trừ khi chỉ định `--format/--json/--raw`).
 
 ---
 
@@ -187,7 +212,7 @@ Chi tiết: xem `gist_db/go/gistdb/README.md` và `gist_db/go/example/`.
 - **Raw cache**: CDN có thể cache raw; mặc định `cacheBust=true` để giảm stale read.
 - **Kích thước**: phù hợp dữ liệu nhỏ/vừa (config, metadata, prototype), không thay thế Postgres/Redis thật cho workload lớn.
 - **Bảo mật**: bảo vệ `GITHUB_TOKEN` và `GISTDB_AUTH`; cân nhắc gitignore `.gistdb-index.json` nếu cần (đã có `gist_db/.gitignore`).
-- **Protocol**: TCP dùng JSON-line protocol tự định nghĩa (gửi/nhận JSON mỗi dòng) qua URL `gistdb://...`; REST dùng HTTP+JSON qua URL `http(s)://...`.
+- **Protocol**: TCP dùng JSON-line protocol tự định nghĩa qua URL `gistdb://...`; REST dùng HTTP+JSON qua URL `http(s)://...`; có thêm Redis RESP (`redis://`, tương thích `redis-cli`, KV) và PostgreSQL wire protocol v3 subset (`postgresql://`, tương thích `psql`, SQL/table). Các protocol chuẩn (Redis/PG) được hỗ trợ ở mức tương thích thực dụng/subset (các lệnh/câu lệnh và luồng cơ bản), không đảm bảo tương đương 100% với toàn bộ tính năng/edge-case của Redis/PostgreSQL thật.
 
 ## Ví dụ Node
 
