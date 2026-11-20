@@ -1,0 +1,8 @@
+.gistdb-index.json
+.gistdb-index.json.tmp
+.gistdb-data/
+*.log
+dist/
+build/
+*.exe
+.DS_Store

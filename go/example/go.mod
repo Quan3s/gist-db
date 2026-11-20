@@ -1,0 +1,7 @@
+module example.com/gistdb-example
+
+go 1.21
+
+require github.com/vsphone/gistdb-go/gistdb v0.0.0
+
+replace github.com/vsphone/gistdb-go/gistdb => ../gistdb

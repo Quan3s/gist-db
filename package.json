@@ -1,0 +1,14 @@
+{
+  "name": "gist-db",
+  "version": "0.2.0",
+  "description": "A novel database using GitHub Gist as storage: table mode (PostgreSQL-like) and key/value mode (Redis-like). Reads via raw URLs to avoid GitHub API rate limits. Includes CLI, REST+TCP server, and Go client.",
+  "main": "index.js",
+  "type": "commonjs",
+  "bin": {
+    "gistdb": "bin/gistdb.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
