@@ -72,13 +72,25 @@ func runClient(cmd string, argv []string) {
 	db := fs.String("db", os.Getenv("GISTDB_DB"), "database name")
 	mode := fs.String("mode", os.Getenv("GISTDB_MODE"), "mode: kv|table")
 	timeout := fs.Int("timeout", 60, "timeout seconds")
-	if err := fs.Parse(normalizeArgs(argv)); err != nil {
+	flagArgs, rest := extractArgs(argv)
+	if err := fs.Parse(flagArgs); err != nil {
 		os.Exit(1)
 	}
-	rest := fs.Args()
 
 	if *url == "" {
 		fatal(errors.New("--url is required (gistdb://... for TCP or http(s)://... for REST)"))
+	}
+
+	// Infer db/mode from URL when not explicitly provided.
+	if *db == "" || *mode == "" {
+		if ci, err := gistdb.ParseURL(*url); err == nil {
+			if *db == "" {
+				*db = ci.DB
+			}
+			if *mode == "" {
+				*mode = ci.Mode
+			}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeout)*time.Second)
@@ -293,16 +305,44 @@ func execTable(ctx context.Context, client *gistdb.Client, db, op string, args [
 	return client.Command(ctx, req)
 }
 
-func normalizeArgs(argv []string) []string {
-	out := make([]string, 0, len(argv))
-	for _, a := range argv {
+// extractArgs separates known flags (--url, --db, --mode, --timeout) from positional args,
+// allowing flags to appear before or after positional arguments.
+func extractArgs(argv []string) (flagArgs []string, positional []string) {
+	known := map[string]bool{"--url": true, "--db": true, "--mode": true, "--timeout": true}
+	i := 0
+	for i < len(argv) {
+		a := argv[i]
+		// normalize single-dash long flags: -url -> --url
 		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && len(a) > 2 {
-			out = append(out, "-"+a)
-		} else {
-			out = append(out, a)
+			a = "-" + a
 		}
+		name := a
+		hasEq := false
+		if strings.HasPrefix(a, "--") {
+			if idx := strings.Index(a, "="); idx >= 0 {
+				name = a[:idx]
+				hasEq = true
+			}
+		}
+		if known[name] {
+			if hasEq {
+				flagArgs = append(flagArgs, a)
+				i++
+			} else {
+				flagArgs = append(flagArgs, name)
+				if i+1 < len(argv) {
+					flagArgs = append(flagArgs, argv[i+1])
+					i += 2
+				} else {
+					i++
+				}
+			}
+			continue
+		}
+		positional = append(positional, argv[i])
+		i++
 	}
-	return out
+	return
 }
 
 func parseLoose(s string) interface{} {
